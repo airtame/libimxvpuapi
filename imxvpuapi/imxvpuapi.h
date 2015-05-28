@@ -649,7 +649,7 @@ int imx_vpu_dec_check_if_can_decode(ImxVpuDecoder *decoder);
  * It is safe to mark a framebuffer multiple times. The library will simply ignore the subsequent calls. */
 ImxVpuDecReturnCodes imx_vpu_dec_mark_framebuffer_as_displayed(ImxVpuDecoder *decoder, ImxVpuFramebuffer *framebuffer);
 
-
+ImxVpuDecReturnCodes imx_vpu_dec_resolution_change(ImxVpuDecoder **decoder, ImxVpuDecOpenParams *open_params, ImxVpuDMABuffer *bitstream_buffer);
 
 
 /************************************************/

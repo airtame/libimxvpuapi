@@ -1844,8 +1844,11 @@ ImxVpuDecReturnCodes imx_vpu_dec_decode(ImxVpuDecoder *decoder, ImxVpuEncodedFra
 		else
 		{
 			IMX_VPU_TRACE("Nothing yet to display ; indexFrameDisplay: %d", decoder->dec_output_info.indexFrameDisplay);
+            if ((decoder->dec_output_info.decPicWidth != decoder->initial_info.picWidth) || (decoder->dec_output_info.decPicHeight != decoder->initial_info.picHeight)) {
+                IMX_VPU_DEBUG("Resolution of stream has changed!");
+                *output_code |= IMX_VPU_DEC_OUTPUT_CODE_RESOLUTION_CHANGED;
+            }
 		}
-
 	}
 
 
@@ -1957,7 +1960,138 @@ ImxVpuDecReturnCodes imx_vpu_dec_mark_framebuffer_as_displayed(ImxVpuDecoder *de
 	return IMX_VPU_DEC_RETURN_CODE_OK;
 }
 
+ImxVpuDecReturnCodes imx_vpu_dec_resolution_change(ImxVpuDecoder **decoder, ImxVpuDecOpenParams *open_params, ImxVpuDMABuffer *bitstream_buffer) {
+    ImxVpuDecReturnCodes ret;
+    RetCode dec_ret;
+    DecHandle VpuHandle = (*decoder)->handle;
+    imx_vpu_dec_new_initial_info_callback initial_info_callback = (*decoder)->initial_info_callback;
+	void *callback_user_data = (*decoder)->callback_user_data;
+    ImxVpuDecoder temp_decoder;
+    DecOpenParam dec_open_param;
 
+    dec_ret=vpu_DecClose(VpuHandle);
+	ret = IMX_VPU_DEC_HANDLE_ERROR("could not close decoder", dec_ret);
+    assert(ret == IMX_VPU_DEC_RETURN_CODE_OK);
+
+    if ((*decoder)->context_for_frames != NULL)
+        IMX_VPU_FREE((*decoder)->context_for_frames, sizeof(void*) * (*decoder)->num_framebuffers);
+    if ((*decoder)->internal_framebuffers != NULL)
+        IMX_VPU_FREE((*decoder)->internal_framebuffers, sizeof(FrameBuffer) * (*decoder)->num_framebuffers);
+    if ((*decoder)->frame_modes != NULL)
+        IMX_VPU_FREE((*decoder)->frame_modes, sizeof(FrameMode) * (*decoder)->num_framebuffers);
+
+    IMX_VPU_FREE(*decoder, sizeof(ImxVpuDecoder));
+    *decoder = IMX_VPU_ALLOC(sizeof(ImxVpuDecoder));
+
+    memset((*decoder), 0, sizeof(ImxVpuDecoder));
+
+    (*decoder)->available_decoded_pic_idx = -1;
+
+
+	/* Map the bitstream buffer. This mapping will persist until the decoder is closed. */
+	(*decoder)->bitstream_buffer_virtual_address = imx_vpu_dma_buffer_map(bitstream_buffer, 0);
+	(*decoder)->bitstream_buffer_physical_address = imx_vpu_dma_buffer_get_physical_address(bitstream_buffer);
+
+    (*decoder)->initial_info_callback = initial_info_callback;
+	(*decoder)->callback_user_data = callback_user_data;
+
+	/* Fill in values into the VPU's decoder open param structure */
+	memset(&dec_open_param, 0, sizeof(dec_open_param));
+	switch (open_params->codec_format)
+	{
+		case IMX_VPU_CODEC_FORMAT_H264:
+		case IMX_VPU_CODEC_FORMAT_H264_MVC:
+			dec_open_param.bitstreamFormat = STD_AVC;
+			dec_open_param.reorderEnable = open_params->enable_frame_reordering;
+			break;
+		case IMX_VPU_CODEC_FORMAT_MPEG2:
+			dec_open_param.bitstreamFormat = STD_MPEG2;
+			break;
+		case IMX_VPU_CODEC_FORMAT_MPEG4:
+			dec_open_param.bitstreamFormat = STD_MPEG4;
+			dec_open_param.mp4Class = 0;
+			break;
+		case IMX_VPU_CODEC_FORMAT_H263:
+			dec_open_param.bitstreamFormat = STD_H263;
+			break;
+		case IMX_VPU_CODEC_FORMAT_WMV3:
+			dec_open_param.bitstreamFormat = STD_VC1;
+			break;
+		case IMX_VPU_CODEC_FORMAT_WVC1:
+			dec_open_param.bitstreamFormat = STD_VC1;
+			dec_open_param.reorderEnable = 1;
+			break;
+		case IMX_VPU_CODEC_FORMAT_MJPEG:
+			dec_open_param.bitstreamFormat = STD_MJPG;
+			break;
+		case IMX_VPU_CODEC_FORMAT_VP8:
+			dec_open_param.bitstreamFormat = STD_VP8;
+			dec_open_param.reorderEnable = 1;
+			break;
+		default:
+			break;
+	}
+
+	dec_open_param.bitstreamBuffer = (*decoder)->bitstream_buffer_physical_address;
+	dec_open_param.bitstreamBufferSize = VPU_MAIN_BITSTREAM_BUFFER_SIZE;
+	dec_open_param.qpReport = 0;
+	dec_open_param.mp4DeblkEnable = 0;
+	dec_open_param.chromaInterleave = 0;
+	dec_open_param.filePlayEnable = 0;
+	dec_open_param.picWidth = open_params->frame_width;
+	dec_open_param.picHeight = open_params->frame_height;
+	dec_open_param.avcExtension = (open_params->codec_format == IMX_VPU_CODEC_FORMAT_H264_MVC);
+	dec_open_param.dynamicAllocEnable = 0;
+	dec_open_param.streamStartByteOffset = 0;
+	dec_open_param.mjpg_thumbNailDecEnable = 0;
+	dec_open_param.psSaveBuffer = (*decoder)->bitstream_buffer_physical_address + VPU_MAIN_BITSTREAM_BUFFER_SIZE + VPU_MAX_SLICE_BUFFER_SIZE;
+	dec_open_param.psSaveBufferSize = VPU_PS_SAVE_BUFFER_SIZE;
+	dec_open_param.mapType = 0;
+	dec_open_param.tiled2LinearEnable = 0; // this must ALWAYS be 0, otherwise VPU hangs eventually (it is 0 in the wrapper except for MX6X)
+	dec_open_param.bitstreamMode = 1;
+
+	/* Motion-JPEG specific settings
+	 * With motion JPEG, the VPU is configured to operate in line buffer mode,
+	 * because it is easier to handle. During decoding, pointers to the
+	 * beginning of the JPEG data inside the bitstream buffer have to be set,
+	 * which is much simpler if the VPU operates in line buffer mode (one then
+	 * has to only set the pointers to refer to the beginning of the bitstream
+	 * buffer, since in line buffer mode, this is where the encoded frame
+	 * is always placed*/
+	if (open_params->codec_format == IMX_VPU_CODEC_FORMAT_MJPEG)
+	{
+		dec_open_param.jpgLineBufferMode = 1;
+		/* This one is not mentioned in the specs for some reason,
+		 * but is required for motion JPEG to work */
+		dec_open_param.pBitStream = (*decoder)->bitstream_buffer_virtual_address;
+	}
+	else
+		dec_open_param.jpgLineBufferMode = 0;
+
+	/* Now actually open the decoder instance */
+	IMX_VPU_TRACE("opening decoder, picture size: %u x %u pixel", open_params->frame_width, open_params->frame_height);
+	dec_ret = vpu_DecOpen(&VpuHandle, &dec_open_param);
+	ret = IMX_VPU_DEC_HANDLE_ERROR("could not open decoder", dec_ret);
+    assert(ret == IMX_VPU_DEC_RETURN_CODE_OK);
+
+    (*decoder)->handle = VpuHandle;
+	(*decoder)->codec_format = open_params->codec_format;
+	(*decoder)->bitstream_buffer = bitstream_buffer;
+	(*decoder)->picture_width = open_params->frame_width;
+	(*decoder)->picture_height = open_params->frame_height;
+
+	/* Finish & cleanup (in case of error) */
+	if (ret != IMX_VPU_DEC_RETURN_CODE_OK) {
+        imx_vpu_dma_buffer_unmap(bitstream_buffer);
+        IMX_VPU_FREE(*decoder, sizeof(ImxVpuDecoder));
+        *decoder = NULL;
+        return ret;
+    }
+    else {
+        IMX_VPU_TRACE("successfully opened decoder");
+    }
+	return ret;
+}
 
 
 /************************************************/
