@@ -918,6 +918,7 @@ ImxVpuDecReturnCodes imx_vpu_dec_get_initial_info(ImxVpuDecoder *decoder, ImxVpu
 	ret = VPU_DecGetInitialInfo(decoder->handle, &init_info);
 	IMX_VPU_LOG("VPU_DecGetInitialInfo: min num framebuffers required: %d", init_info.nMinFrameBufferCount);
 	dec_convert_from_wrapper_initial_info(&init_info, info);
+    info->min_num_required_framebuffers += MIN_NUM_FREE_FB_REQUIRED;
 	return dec_convert_retcode(ret);
 }
 
