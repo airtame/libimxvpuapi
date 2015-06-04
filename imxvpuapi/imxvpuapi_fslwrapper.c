@@ -417,7 +417,7 @@ static void dec_convert_from_wrapper_initial_info(VpuDecInitInfo *wrapper_info, 
 	info->frame_rate_numerator    = wrapper_info->nFrameRateRes;
 	info->frame_rate_denominator  = wrapper_info->nFrameRateDiv;
 
-	info->min_num_required_framebuffers = wrapper_info->nMinFrameBufferCount + MIN_NUM_FREE_FB_REQUIRED;
+	info->min_num_required_framebuffers = wrapper_info->nMinFrameBufferCount + MIN_NUM_FREE_FB_REQUIRED * 2;
 	info->color_format                  = convert_from_wrapper_color_format(wrapper_info->nMjpgSourceFormat);
 
 	info->interlacing = wrapper_info->nInterlace;
