@@ -1,0 +1,1 @@
+#define IMXVPUAPI_VERSION "0.10.3"
