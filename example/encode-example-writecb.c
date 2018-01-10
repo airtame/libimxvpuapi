@@ -31,7 +31,11 @@
  *
  * This expects as input a file with uncompressed 320x240 i420 frames and
  * 25 fps. The encoder outputs a byte-stream formatted h.264 stream, which
- * can be played with VLC or mplayer for example. */
+ * can be played with VLC or mplayer for example.
+ *
+ * It demonstrates the alternative write-callback style encoding, compared
+ * to encode-example.c (= write_output_data is set instead of
+ * acquire_output_buffer and finish_output_buffer). */
 
 
 
@@ -164,26 +168,17 @@ Context* init(FILE *input_file, FILE *output_file)
 }
 
 
-void* acquire_output_buffer(void *context, size_t size, void **acquired_handle)
+int write_output_data(void *context, uint8_t const *data, uint32_t size, ImxVpuEncodedFrame *encoded_frame)
 {
-	void *mem;
+	FILE *f;
+	
+	((void)(encoded_frame));
 
-	((void)(context));
+	f = (FILE *)context;
 
-	/* In this example, "acquire" a buffer by simply allocating it with malloc() */
-	mem = malloc(size);
-	*acquired_handle = mem;
-	fprintf(stderr, "acquired output buffer, handle %p\n", *acquired_handle);
-	return mem;
-}
+	fwrite(data, 1, size, f);
 
-
-void finish_output_buffer(void *context, void *acquired_handle)
-{
-	((void)(context));
-
-	/* Nothing needs to be done here in this example. Just log this call. */
-	fprintf(stderr, "finished output buffer, handle %p\n", acquired_handle);
+	return 1;
 }
 
 
@@ -203,12 +198,13 @@ Retval run(Context *ctx)
 	/* Set the encoding parameters for this frame. quant_param 0 is
 	 * the highest quality in h.264 constant quality encoding mode.
 	 * (The range in h.264 is 0-51, where 0 is best quality and worst
-	 * compression, and 51 vice versa.) */
+	 * compression, and 51 vice versa.)
+	 * Also pass the file handle to the output buffer context so
+	 * the write_output_data() function can use it. */
 	memset(&enc_params, 0, sizeof(enc_params));
 	enc_params.quant_param = 0;
-	enc_params.acquire_output_buffer = acquire_output_buffer;
-	enc_params.finish_output_buffer = finish_output_buffer;
-	enc_params.output_buffer_context = NULL;
+	enc_params.write_output_data = write_output_data;
+	enc_params.output_buffer_context = ctx->fout;
 
 	/* Set up the output frame. Simply setting all fields to zero/NULL
 	 * is enough. The encoder will fill in data. */
@@ -218,7 +214,6 @@ Retval run(Context *ctx)
 	for (;;)
 	{
 		uint8_t *mapped_virtual_address;
-		void *output_block;
 
 		/* Read uncompressed pixels into the input DMA buffer */
 		mapped_virtual_address = imx_vpu_dma_buffer_map(ctx->input_fb_dmabuffer, IMX_VPU_MAPPING_FLAG_WRITE);
@@ -229,21 +224,9 @@ Retval run(Context *ctx)
 		if (feof(ctx->fin))
 			break;
 
-		/* The actual encoding */
+		/* The actual encoding. It internally calls write_output_data()
+		 * whenever it has new data to output. */
 		imx_vpu_enc_encode(ctx->vpuenc, &input_frame, &output_frame, &enc_params, &output_code);
-
-		/* Write out the encoded frame to the output file. The encoder
-		 * will have called acquire_output_buffer(), which acquires a
-		 * buffer by malloc'ing it. The "handle" in this example is
-		 * just the pointer to the allocated memory. This means that
-		 * here, acquired_handle is the pointer to the encoded frame
-		 * data. Write it to file, and then free the previously
-		 * allocated block. In production, the acquire function could
-		 * retrieve an output memory block from a buffer pool for
-		 * example. */
-		output_block = output_frame.acquired_handle;
-		fwrite(output_block, 1, output_frame.data_size, ctx->fout);
-		free(output_block);
 	}
 
 	return RETVAL_OK;

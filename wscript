@@ -49,14 +49,16 @@ def add_compiler_flags(conf, env, flags, lang, compiler, uselib = ''):
 def options(opt):
 	opt.add_option('--enable-debug', action = 'store_true', default = False, help = 'enable debug build [default: %default]')
 	opt.add_option('--enable-static', action = 'store_true', default = False, help = 'build static library [default: build shared library]')
-	opt.add_option('--use-vpulib-backend', action = 'store_true', default = False, help = 'use the vpulib backend instead of the vpu wrapper one [EXPERIMENTAL] [default: %default]')
+	opt.add_option('--use-fslwrapper-backend', action = 'store_true', default = False, help = 'use the Freescale VPU wrapper (= libfslvpuwrap) backend instead of the vpulib (= imx-vpu) one [default: %default]')
 	opt.load('compiler_c')
+	opt.load('gnu_dirs')
 
 
 def configure(conf):
 	import os
 
 	conf.load('compiler_c')
+	conf.load('gnu_dirs')
 
 	# check and add compiler flags
 
@@ -76,26 +78,60 @@ def configure(conf):
 	add_compiler_flags(conf, conf.env, compiler_flags, 'C', 'C')
 
 	conf.env['BUILD_STATIC'] = conf.options.enable_static
-	conf.env['USE_VPULIB_BACKEND'] = conf.options.use_vpulib_backend
 
 
 	# test for Freescale libraries
 
-	if conf.options.use_vpulib_backend:
+	if not conf.options.use_fslwrapper_backend:
+		Logs.pprint('GREEN', 'using the vpulib backend')
 		conf.check_cc(lib = 'vpu', uselib_store = 'VPULIB', mandatory = 1)
 		conf.env['VPUAPI_USELIBS'] = ['VPULIB']
 		conf.env['VPUAPI_BACKEND_SOURCE'] = ['imxvpuapi/imxvpuapi_vpulib.c']
+
+		with_sof_stuff = conf.check_cc(fragment = '''
+			#include <vpu_lib.h>
+			int main() {
+				return ENC_ENABLE_SOF_STUFF * 0;
+			}
+			''',
+			uselib = 'VPULIB',
+			mandatory = False,
+			execute = False,
+			msg = 'checking if ENC_ENABLE_SOF_STUFF exists'
+		)
+		if with_sof_stuff:
+			conf.define('HAVE_ENC_ENABLE_SOF_STUFF', 1)
+
 	else:
-		conf.check_cfg(package = 'libfslvpuwrap', uselib_store = 'FSLVPUWRAPPER', args = '--cflags --libs', mandatory = 1)
+		Logs.pprint('GREEN', 'using the fslwrapper backend')
+		conf.check_cfg(package = 'libfslvpuwrap >= 1.0.45', uselib_store = 'FSLVPUWRAPPER', args = '--cflags --libs', mandatory = 1)
 		conf.env['VPUAPI_USELIBS'] = ['FSLVPUWRAPPER']
 		conf.env['VPUAPI_BACKEND_SOURCE'] = ['imxvpuapi/imxvpuapi_fslwrapper.c']
 
 
-def build(bld):
-	version_node = bld.srcnode.find_node('VERSION')
+	# Process the library version number
+
+	version_node = conf.srcnode.find_node('VERSION')
 	with open(version_node.abspath()) as x:
 		version = x.readline().splitlines()[0]
 
+	conf.env['IMXVPUAPI_VERSION'] = version
+	conf.define('IMXVPUAPI_VERSION', version)
+
+
+	# Workaround to ensure previously generated .pc files aren't stale
+
+	pcnode = conf.path.get_bld().find_node('libimxvpuapi.pc')
+	if pcnode:
+		pcnode.delete()
+
+
+	# Write the config header
+
+	conf.write_config_header('config.h')
+
+
+def build(bld):
 	bld(
 		features = ['c', 'cstlib' if bld.env['BUILD_STATIC'] else 'cshlib'],
 		includes = ['.'],
@@ -103,13 +139,17 @@ def build(bld):
 		source = ['imxvpuapi/imxvpuapi.c', 'imxvpuapi/imxvpuapi_jpeg.c', 'imxvpuapi/imxvpuapi_parse_jpeg.c'] + bld.env['VPUAPI_BACKEND_SOURCE'],
 		name = 'imxvpuapi',
 		target = 'imxvpuapi',
-		vnum = version
+		vnum = bld.env['IMXVPUAPI_VERSION']
 	)
+
+	bld.install_files('${PREFIX}/include/imxvpuapi/', ['imxvpuapi/imxvpuapi.h', 'imxvpuapi/imxvpuapi_jpeg.h'])
 
 	examples = [ \
 		{ 'name': 'decode-example', 'source': ['example/decode-example.c'] }, \
 		{ 'name': 'encode-example', 'source': ['example/encode-example.c'] }, \
+		{ 'name': 'encode-example-writecb', 'source': ['example/encode-example-writecb.c'] }, \
 		{ 'name': 'jpeg-dec-example', 'source': ['example/jpeg-dec-example.c'] }, \
+		{ 'name': 'jpeg-enc-example', 'source': ['example/jpeg-enc-example.c'] }, \
 	]
 
 	bld(
@@ -121,11 +161,19 @@ def build(bld):
 		name = 'examples-common'
 	)
 
+	bld(
+		features = ['subst'],
+		source = "libimxvpuapi.pc.in",
+		target="libimxvpuapi.pc",
+		install_path="${LIBDIR}/pkgconfig"
+	)
+
 	for example in examples:
 		bld(
 			features = ['c', 'cprogram'],
 			includes = ['.', 'example'],
 			cflags = ['-std=gnu99'],
+			uselib = bld.env['VPUAPI_USELIBS'],
 			use = 'imxvpuapi examples-common',
 			source = example['source'],
 			target = 'example/' + example['name'],
